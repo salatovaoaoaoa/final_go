@@ -18,142 +18,150 @@ import (
 )
 
 const (
-    N_REQUESTS = "N_REQUESTS"
-    N_WORKERS = "N_WORKERS"
-    N_WORKER_REQUESTS = "N_WORKER_REQUESTS"
-    CLIENT_MAX_RPS = "CLIENT_MAX_RPS"
+	N_REQUESTS        = "N_REQUESTS"
+	N_WORKERS         = "N_WORKERS"
+	N_WORKER_REQUESTS = "N_WORKER_REQUESTS"
+	CLIENT_MAX_RPS    = "CLIENT_MAX_RPS"
 )
 
-var (
-    statsLock sync.Mutex
-    stats = map[int]int{}
+type Spamer struct {
+	StatsLock *sync.Mutex
+	Stats     map[int]int
 
-    nRequestsLeft int64
+	NRequestsLeft int64
 
-    limiter *rate.Limiter
-)
+	Limiter *rate.Limiter
+}
 
 func loadEnvVars() (
-    serverUrl string,
-    nRequests int,
-    nWorkerRequests int,
-    nWorkers int,
-    maxRps int,
+	serverUrl string,
+	nRequests int,
+	nWorkerRequests int,
+	nWorkers int,
+	maxRps int,
 ) {
-    err := dotenv.LoadEnv()
+	err := dotenv.LoadEnv()
 	if err != nil {
 		log.Fatal("Error loading env file")
 	}
 
-    serverUrl = url.GetServerUrl()
-    nRequests, err = strconv.Atoi(dotenv.GetEnvVar(N_REQUESTS))
+	serverUrl = url.GetServerUrl()
+	nRequests, err = strconv.Atoi(dotenv.GetEnvVar(N_REQUESTS))
 
-    if err != nil {
-        log.Printf("Invalid %s env parameter\n", N_REQUESTS)
-        return
-    }
+	if err != nil {
+		log.Printf("Invalid %s env parameter\n", N_REQUESTS)
+		return
+	}
 
-    nWorkers, err = strconv.Atoi(dotenv.GetEnvVar(N_WORKERS))
+	nWorkers, err = strconv.Atoi(dotenv.GetEnvVar(N_WORKERS))
 
-    if err != nil {
-        log.Printf("Invalid %s env parameter\n", N_WORKERS)
-        return
-    }
+	if err != nil {
+		log.Printf("Invalid %s env parameter\n", N_WORKERS)
+		return
+	}
 
-    nWorkerRequests, err = strconv.Atoi(dotenv.GetEnvVar(N_WORKER_REQUESTS))
+	nWorkerRequests, err = strconv.Atoi(dotenv.GetEnvVar(N_WORKER_REQUESTS))
 
-    if err != nil {
-        log.Printf("Invalid %s env parameter\n", N_WORKER_REQUESTS)
-        return
-    }
+	if err != nil {
+		log.Printf("Invalid %s env parameter\n", N_WORKER_REQUESTS)
+		return
+	}
 
-    maxRps, err = strconv.Atoi(dotenv.GetEnvVar(CLIENT_MAX_RPS))
-    if err != nil {
-        log.Printf("Invalid %s env parameter\n", CLIENT_MAX_RPS)
-        return
-    }
+	maxRps, err = strconv.Atoi(dotenv.GetEnvVar(CLIENT_MAX_RPS))
+	if err != nil {
+		log.Printf("Invalid %s env parameter\n", CLIENT_MAX_RPS)
+		return
+	}
 
-    return
+	return
 }
 
-func updateStats(statusCode int) {
-    statsLock.Lock()
-    _, ok := stats[statusCode]
-    if ok {
-        stats[statusCode] += 1
-    } else {
-        stats[statusCode] = 1
-    }
-    statsLock.Unlock()
+func (s Spamer) updateStats(statusCode int) {
+	s.StatsLock.Lock()
+	_, ok := s.Stats[statusCode]
+	if ok {
+		s.Stats[statusCode] += 1
+	} else {
+		s.Stats[statusCode] = 1
+	}
+	s.StatsLock.Unlock()
 }
 
-func sendPostRequest(serverUrl string, data []byte) {
-    reservation := limiter.Reserve()
-    time.Sleep(reservation.Delay())
+func (s Spamer) sendPostRequest(serverUrl string, data []byte) {
+	reservation := s.Limiter.Reserve()
+	time.Sleep(reservation.Delay())
 
-    resp, err := http.Post(serverUrl, "application/json", bytes.NewBuffer(data))
-    if err != nil {
-        log.Fatalf("Error sending POST request: %v\n", err)
-        return
-    }
-    defer resp.Body.Close()
+	resp, err := http.Post(serverUrl, "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		log.Fatalf("Error sending POST request: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
 
-    updateStats(resp.StatusCode)
-    log.Printf("Response status: %s\n", resp.Status)
+	s.updateStats(resp.StatusCode)
+	log.Printf("Response status: %s\n", resp.Status)
 }
 
-func runWorker(workersWg *sync.WaitGroup, nWorkerRequests int, serverUrl string, data []byte) {
-    defer workersWg.Done()
+func (s Spamer) runWorker(workersWg *sync.WaitGroup, nWorkerRequests int, serverUrl string, data []byte) {
+	defer workersWg.Done()
 
-    for {
-        currentRequestsLeft := atomic.LoadInt64(&nRequestsLeft)
-        if currentRequestsLeft <= 0 {
-            return
-        }
+	for {
+		currentRequestsLeft := atomic.LoadInt64(&s.NRequestsLeft)
+		if currentRequestsLeft <= 0 {
+			return
+		}
 
-        newValue := int64(math.Max(0, float64(currentRequestsLeft - int64(nWorkerRequests))))
-        swapped := atomic.CompareAndSwapInt64(&nRequestsLeft, currentRequestsLeft, newValue)
+		newValue := int64(math.Max(0, float64(currentRequestsLeft-int64(nWorkerRequests))))
+		swapped := atomic.CompareAndSwapInt64(&s.NRequestsLeft, currentRequestsLeft, newValue)
 
-        if !swapped {
-            continue
-        }
+		if !swapped {
+			continue
+		}
 
-        requestsTBD := currentRequestsLeft - newValue
-        for i := int64(0); i < requestsTBD; i++ {
-            sendPostRequest(serverUrl, data)
-        }
-    }
+		requestsTBD := currentRequestsLeft - newValue
+		for i := int64(0); i < requestsTBD; i++ {
+			s.sendPostRequest(serverUrl, data)
+		}
+	}
 }
 
-func getStatMessage() string {
-    if len(stats) == 0 {
-        return "Нет статистики"
-    }
+func (s Spamer) getStatMessage() string {
+	if len(s.Stats) == 0 {
+		return "Нет статистики"
+	}
 
-    var statuses []string
-    statsLock.Lock()
-    for k, v := range stats {
-        statuses = append(statuses, fmt.Sprintf(" %d - %d", k, v))
-    }
-    statsLock.Unlock()
+	var statuses []string
+	s.StatsLock.Lock()
+	for k, v := range s.Stats {
+		statuses = append(statuses, fmt.Sprintf(" %d - %d", k, v))
+	}
+	s.StatsLock.Unlock()
 
-    return "Разбивка по статусам: " + strings.Join(statuses, ", ")
+	return "Разбивка по статусам: " + strings.Join(statuses, ", ")
+}
+
+func (s Spamer) run(id int, serverUrl string, nWorkers int, nWorkerRequests int) {
+	data := []byte(fmt.Sprintf(`{"Id": %d}`, id))
+
+	var workersWg sync.WaitGroup
+	workersWg.Add(nWorkers)
+	for i := 0; i < nWorkers; i++ {
+		go s.runWorker(&workersWg, nWorkerRequests, serverUrl, data)
+	}
+	workersWg.Wait()
+
+	log.Print(s.getStatMessage())
 }
 
 func RunSpamerClient(id int) {
-    serverUrl, nRequests, nWorkerRequests, nWorkers, maxRps := loadEnvVars()
+	serverUrl, nRequests, nWorkerRequests, nWorkers, maxRps := loadEnvVars()
 
-    nRequestsLeft = int64(nRequests)
-    limiter = rate.NewLimiter(rate.Limit(maxRps), maxRps)
+	spamer := Spamer{
+		StatsLock:     &sync.Mutex{},
+		Stats:         map[int]int{},
+		NRequestsLeft: int64(nRequests),
+		Limiter:       rate.NewLimiter(rate.Limit(maxRps), maxRps),
+	}
 
-    data := []byte(fmt.Sprintf(`{"Id": %d}`, id))
-
-    var workersWg sync.WaitGroup
-    workersWg.Add(nWorkers)
-    for i := 0; i < nWorkers; i++ {
-        go runWorker(&workersWg, nWorkerRequests, serverUrl, data)
-    }
-    workersWg.Wait()
-
-    log.Print(getStatMessage())
+	spamer.run(id, serverUrl, nWorkers, nWorkerRequests)
 }

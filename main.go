@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-    go server.Run()
+	go server.Run()
 	go clients.RunCheckerClient()
 
 	time.Sleep(time.Duration(time.Second))
